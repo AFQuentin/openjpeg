@@ -1971,8 +1971,139 @@ int imagetotif(opj_image_t * image, const char *outfile)
         return 0;
     }
 
-    TIFFClose(tif);
+    if(image->numcomps == 3 /* YUV 4:2:2 */
+        && 2 * image->comps[0].dx == image->comps[1].dx
+        && image->comps[1].dx == image->comps[2].dx
+        && image->comps[0].dy == image->comps[1].dy
+        && image->comps[1].dy == image->comps[2].dy
+        && image->comps[0].prec == image->comps[1].prec
+        && image->comps[1].prec == image->comps[2].prec)
+    {
+        width   = (int)image->comps[0].w;
+        height  = (int)image->comps[0].h;
+        imgsize = width * height;
 
+        float *luma, *refBlackWhite;
+
+        TIFFYCbCrToRGB* ycbcr = (TIFFYCbCrToRGB*)
+             _TIFFmalloc(sizeof(TIFFYCbCrToRGB)
+                  + 4*256*sizeof(TIFFRGBValue)
+                  + 2*256*sizeof(int)
+                  + 3*256*sizeof(int32));
+
+        if (ycbcr == NULL) {
+                TIFFError("YCbCr->RGB",
+                  "No space for YCbCr->RGB conversion state");
+                exit(0);
+        }
+
+        TIFF* yuvTiffStruct;
+        yuvTiffStruct = TIFFOpen(outfile, "wb");
+        TIFFSetField(yuvTiffStruct, TIFFTAG_IMAGEWIDTH, width);
+        TIFFSetField(yuvTiffStruct, TIFFTAG_IMAGELENGTH, height);
+        TIFFSetField(yuvTiffStruct, TIFFTAG_SAMPLESPERPIXEL, 3);
+        TIFFSetField(yuvTiffStruct, TIFFTAG_BITSPERSAMPLE, bps);
+        TIFFSetField(yuvTiffStruct, TIFFTAG_ORIENTATION, ORIENTATION_TOPLEFT);
+        TIFFSetField(yuvTiffStruct, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
+        TIFFSetField(yuvTiffStruct, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_YCBCR);
+        TIFFSetField(yuvTiffStruct, TIFFTAG_ROWSPERSTRIP, 1);
+
+        TIFFGetFieldDefaulted(yuvTiffStruct, TIFFTAG_YCBCRCOEFFICIENTS, &luma);
+        TIFFGetFieldDefaulted(yuvTiffStruct, TIFFTAG_REFERENCEBLACKWHITE, &refBlackWhite);
+
+        if (TIFFYCbCrToRGBInit(ycbcr, luma, refBlackWhite) < 0)
+             exit(0);
+
+        TIFFSetField(tif, TIFFTAG_IMAGEWIDTH, width);
+        TIFFSetField(tif, TIFFTAG_IMAGELENGTH, height);
+        TIFFSetField(tif, TIFFTAG_SAMPLESPERPIXEL, 3);
+        TIFFSetField(tif, TIFFTAG_BITSPERSAMPLE, 8);
+        TIFFSetField(tif, TIFFTAG_ORIENTATION, ORIENTATION_TOPLEFT);
+        TIFFSetField(tif, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
+        TIFFSetField(tif, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_RGB);
+        TIFFSetField(tif, TIFFTAG_ROWSPERSTRIP, 1);
+
+        strip_size = TIFFStripSize(tif);
+        buf = _TIFFmalloc(strip_size);
+        index = 0;
+
+        for(strip = 0; strip < TIFFNumberOfStrips(tif); strip++)
+        {
+            unsigned char *dat8;
+            tsize_t i, ssize, last_i = 0;
+            int step, restx;
+            ssize = TIFFStripSize(tif);
+            dat8 = (unsigned char*)buf;
+
+                if(bps == 16)
+                {
+                    for(i = 0; i < ssize; i += 3)
+                    {
+                        if(index < imgsize)
+                        {
+                            uint32 y = 0;
+                            int32 u = 0;
+                            int32 v = 0;
+
+                            uint32 r = 0;
+                            uint32 g = 0;
+                            uint32 b = 0;
+
+                            uint32 componentOffset = index * 0.5;
+                            y = image->comps[0].data[index];
+                            u = image->comps[1].data[componentOffset];
+                            v = image->comps[2].data[componentOffset];
+                            if(sgnd)
+                            {
+                                y += adjust;
+                                u += adjust;
+                                v += adjust;
+                            }
+                            if(force16)
+                            {
+                                y = (y<<ushift) + (y>>dshift);
+                                u = (u<<ushift) + (u>>dshift);
+                                v = (v<<ushift) + (v>>dshift);
+                            }
+                            
+                            if(y > 65535) y = 65535; else if(y < 0) y = 0;
+                            if(u > 65535) u = 65535; else if(u < 0) u = 0;
+                            if(v > 65535) v = 65535; else if(v < 0) v = 0;
+
+                            y = 255.0 * y / 65535;
+                            u = 255.0 * u / 65535;
+                            v = 255.0 * v / 65535;
+
+                            TIFFYCbCrtoRGB( ycbcr, y, u, v, &r, &g, &b);
+
+                            dat8[i+0] = (unsigned char)r;
+                            dat8[i+1] = (unsigned char)g;
+                            dat8[i+2] = (unsigned char)b;
+
+                            index++;
+                        }
+                        else
+                            break;
+                    }
+                }
+                else
+                {
+                    fprintf(stderr,"Only 16 bits is supported\n");
+                }
+
+            (void)TIFFWriteEncodedStrip(tif, strip, (void*)buf, strip_size);
+        }
+
+
+        _TIFFfree(ycbcr);
+        _TIFFfree(buf);
+        TIFFClose(tif);
+        fprintf(stderr,"Write image for YUV 4:2:2\n");
+
+        return 0;
+    }
+
+    TIFFClose(tif);
     fprintf(stderr,"imagetotif: Bad color format.\n"
             "\tOnly RGB(A) and GRAY(A) has been implemented\n");
     fprintf(stderr,"\tFOUND: numcomps(%d)\n\tAborting\n",
